@@ -100,6 +100,8 @@ int main(int argc, const char **argv) {
     int mode = atoi(argv[3]);
     BOOL hevc = mode != 0;
     BOOL pq = mode == 2;
+    // Mode 3: an SDR HEVC Main stream decoded to 8-bit, as the player does for SDR.
+    BOOL tenBit = hevc && mode != 3;
     NSData *encoded = [NSData dataWithContentsOfFile:@(argv[1])];
     NSData *expected = [NSData dataWithContentsOfFile:@(argv[2])];
     assert(encoded.length && expected.length);
@@ -123,7 +125,7 @@ int main(int argc, const char **argv) {
     }
     assert(header.length && frame.length);
     NSData *originalFrame = [frame copy];
-    CNLiveEncodedVideo *decoder = [[CNLiveEncodedVideo alloc] initWithHEVC:hevc];
+    CNLiveEncodedVideo *decoder = [[CNLiveEncodedVideo alloc] initWithHEVC:hevc tenBit:tenBit];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block OSStatus decode_status = 0;
     __block unsigned difference = UINT_MAX;
@@ -132,7 +134,7 @@ int main(int argc, const char **argv) {
       (void)pts;
       decode_status = status;
       if (!status) {
-        difference = pixel_error(surface, expected, hevc);
+        difference = pixel_error(surface, expected, tenBit);
         colour_matches = pq_bt2020(surface) == pq;
       }
       dispatch_semaphore_signal(done);
@@ -184,7 +186,9 @@ int main(int argc, const char **argv) {
     printf(
         "PASS: live %s Annex-B adapter, borrowed input overwrite, hardware pixels match software "
         "within %u, bounded leases and stop.\n",
-        pq ? "HEVC Main10 PQ BT.2020" : (hevc ? "HEVC Main10" : "H.264"), difference);
+        pq ? "HEVC Main10 PQ BT.2020"
+           : (mode == 3 ? "HEVC Main SDR 8-bit" : (hevc ? "HEVC Main10" : "H.264")),
+        difference);
   }
   return 0;
 }

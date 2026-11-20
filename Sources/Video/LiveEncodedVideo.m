@@ -74,9 +74,13 @@ static const CFTimeInterval CNEncodedRebuildInterval = 1.0;
   enum { EncodedIdle, EncodedReady, EncodedFailed, EncodedStopped } _phase;
 }
 - (instancetype)initWithHEVC:(BOOL)hevc {
+  return [self initWithHEVC:hevc tenBit:hevc];
+}
+- (instancetype)initWithHEVC:(BOOL)hevc tenBit:(BOOL)tenBit {
   self = [super init];
   if (self) {
     _hevc = hevc;
+    _tenBit = tenBit;
     _decoder = [CNVideoDecoderClient new];
     _pool = [CNCompressedFramePool new];
     if (!_decoder || !_pool) {
@@ -86,7 +90,7 @@ static const CFTimeInterval CNEncodedRebuildInterval = 1.0;
   return self;
 }
 - (OSStatus)configureWithFormat:(CMVideoFormatDescriptionRef)format sets:(NSData *)sets {
-  OSStatus status = [_decoder configure:format tenBit:_hevc];
+  OSStatus status = [_decoder configure:format tenBit:_tenBit];
   if (status) {
     CFRelease(format);
     return status;
@@ -103,7 +107,7 @@ static const CFTimeInterval CNEncodedRebuildInterval = 1.0;
   _rebuiltAt = CFAbsoluteTimeGetCurrent();
   _rebuilds++;
   atomic_store(&_failureStreak, 0);
-  return [_decoder configure:_format tenBit:_hevc];
+  return [_decoder configure:_format tenBit:_tenBit];
 }
 - (CNVideoSubmitResult)decode:(const uint8_t *)bytes
                        length:(size_t)length

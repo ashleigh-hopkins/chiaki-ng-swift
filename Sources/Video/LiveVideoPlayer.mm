@@ -1213,7 +1213,8 @@ static const uint32_t CNRumblePending = 1u << 16;
   const auto route =
       overInternet ? libchiaking::consoles::Route::internet : libchiaking::consoles::Route::home;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-    self->_encodedDecoder = [[CNLiveEncodedVideo alloc] initWithHEVC:self->_requestedHEVC];
+    self->_encodedDecoder = [[CNLiveEncodedVideo alloc] initWithHEVC:self->_requestedHEVC
+                                                              tenBit:self->_requestedHDR];
     const chiaki_bridge::StreamOutcome outcome = stream->run_console(account, hardware, route);
     NSString *diagnostics = [CNLiveVideoPlayer stringOf:outcome.diagnostics()];
     [self concludeStream:diagnostics
@@ -1282,7 +1283,8 @@ static const uint32_t CNRumblePending = 1u << 16;
   _phase.store(CNPlayerRunning);
   const chiaki_bridge::Bytes account = [CNLiveVideoPlayer bytesOf:accountID];
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    self->_encodedDecoder = [[CNLiveEncodedVideo alloc] initWithHEVC:self->_requestedHEVC];
+    self->_encodedDecoder = [[CNLiveEncodedVideo alloc] initWithHEVC:self->_requestedHEVC
+                                                              tenBit:self->_requestedHDR];
     const chiaki_bridge::StreamOutcome outcome = stream->run_cloud(account, start);
     NSString *diagnostics = [CNLiveVideoPlayer stringOf:outcome.diagnostics()];
     [self concludeStream:diagnostics

@@ -22,6 +22,11 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x180:rate=6
 ffmpeg -hide_banner -loglevel error -y -i "$output/frame.hevc" -frames:v 1 -pix_fmt yuv420p10le -f rawvideo "$output/frame-hevc.yuv"
 "$output/live-encoded-test" "$output/frame.hevc" "$output/frame-hevc.yuv" 1
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x180:rate=60' \
+    -frames:v 1 -c:v libx265 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -profile:v main \
+    -x265-params 'log-level=error:pools=1:frame-threads=1' -f hevc "$output/frame-main.hevc"
+ffmpeg -hide_banner -loglevel error -y -i "$output/frame-main.hevc" -frames:v 1 -pix_fmt yuv420p -f rawvideo "$output/frame-main.yuv"
+"$output/live-encoded-test" "$output/frame-main.hevc" "$output/frame-main.yuv" 3
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x180:rate=60' \
     -frames:v 1 -c:v libx265 -preset ultrafast -tune zerolatency -pix_fmt yuv420p10le -profile:v main10 \
     -x265-params 'log-level=error:pools=1:frame-threads=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10=1' \
     -f hevc "$output/frame-pq.hevc"
