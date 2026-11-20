@@ -350,6 +350,12 @@ auto InputThread::describe(SDL_JoystickID id, SDL_Gamepad* gamepad) -> Entry {
   const SDL_GamepadType type = SDL_GetGamepadType(gamepad);
   device.family = family_of(type);
   device.triggers = is_dualsense(device.vendor, device.product);
+  if (TARGET_OS_IPHONE && device.triggers) {
+    static constexpr std::array<std::uint8_t, 4> trigger_probe{'C', 'N', 'T',
+                                                               '1'};
+    device.triggers = SDL_SendGamepadEffect(gamepad, trigger_probe.data(),
+                                            trigger_probe.size());
+  }
   device.waveform = device.triggers &&
                     device.connection == SDL_JOYSTICK_CONNECTION_WIRELESS &&
                     SDL_SendGamepadEffect(gamepad, probe.data(), probe.size());
@@ -427,6 +433,14 @@ auto InputThread::set_sensor(SDL_Gamepad* gamepad, SDL_SensorType sensor,
 void InputThread::perform_triggers(
     SDL_Gamepad* gamepad, std::span<const std::uint8_t, trigger_size> effects,
     std::uint8_t trigger_intensity, std::uint8_t haptic_intensity) {
+  if (TARGET_OS_IPHONE) {
+    std::array<std::uint8_t, DualSenseReport::controller_trigger_size>
+        controller{};
+    DualSenseReport::controller_triggers(effects, trigger_intensity,
+                                         controller);
+    SDL_SendGamepadEffect(gamepad, controller.data(), controller.size());
+    return;
+  }
   std::array<std::uint8_t, effect_size> packet{};
   DualSenseReport::triggers(effects, packet);
   packet[1] = 0x40;
@@ -1329,7 +1343,7 @@ bool nx_input_switch_rumble(uint32_t instance, const float amplitude[2]) {
 
 bool nx_input_mic_light(uint32_t instance, bool lit) {
   const auto traits = chiaki_bridge::InputThread::shared().traits(instance);
-  if (!traits || !traits->triggers) {
+  if (TARGET_OS_IPHONE || !traits || !traits->triggers) {
     return false;
   }
   auto command = chiaki_bridge::InputThread::make_command(

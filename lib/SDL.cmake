@@ -27,6 +27,9 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -DSDL_SOURCE=${sdl3_SOURCE_DIR}
 execute_process(COMMAND "${CMAKE_COMMAND}" -DSDL_SOURCE=${sdl3_SOURCE_DIR}
     -DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/patches/sdl3-dualsense-trigger-state.patch
     -P "${CMAKE_CURRENT_LIST_DIR}/patches/ApplySDL.cmake" COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${CMAKE_COMMAND}" -DSDL_SOURCE=${sdl3_SOURCE_DIR}
+    -DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/patches/sdl3-dualsense-mfi-triggers.patch
+    -P "${CMAKE_CURRENT_LIST_DIR}/patches/ApplySDL.cmake" COMMAND_ERROR_IS_FATAL ANY)
 add_library(ChiakiInput SHARED bridge/input.cpp bridge/input_commands.cpp bridge/dualsense.cpp bridge/switch_rumble.cpp)
 target_link_libraries(ChiakiInput PRIVATE SDL3::SDL3 PkgConfig::LIBCHIAKING_OPUS "-framework CoreFoundation")
 target_compile_features(ChiakiInput PRIVATE cxx_std_20)

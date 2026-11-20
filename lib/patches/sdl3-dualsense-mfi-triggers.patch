@@ -1,0 +1,73 @@
+--- a/src/joystick/apple/SDL_mfijoystick.m
++++ b/src/joystick/apple/SDL_mfijoystick.m
+@@ -1512,10 +1512,70 @@
+         }
+     }
+     return SDL_Unsupported();
++}
++
++static void IOS_ChiakiSetTrigger(GCDualSenseAdaptiveTrigger *trigger, const Uint8 *effect) API_AVAILABLE(macos(12.3), ios(15.4), tvos(15.4))
++{
++    float start = effect[1] / 255.0f;
++    float end = effect[2] / 255.0f;
++    float strength = effect[3] / 255.0f;
++    float finish = effect[4] / 255.0f;
++    float frequency = effect[5] / 255.0f;
++
++    switch (effect[0]) {
++    case 1:
++        [trigger setModeFeedbackWithStartPosition:start resistiveStrength:strength];
++        break;
++    case 2:
++        [trigger setModeWeaponWithStartPosition:start endPosition:end resistiveStrength:strength];
++        break;
++    case 3:
++        [trigger setModeVibrationWithStartPosition:start amplitude:strength frequency:frequency];
++        break;
++    case 4:
++        [trigger setModeSlopeFeedbackWithStartPosition:start endPosition:end startStrength:strength endStrength:finish];
++        break;
++    case 5: {
++        GCDualSenseAdaptiveTriggerPositionalResistiveStrengths strengths;
++        for (int i = 0; i < GCDualSenseAdaptiveTriggerDiscretePositionCount; ++i) {
++            strengths.values[i] = effect[6 + i] / 255.0f;
++        }
++        [trigger setModeFeedbackWithResistiveStrengths:strengths];
++        break;
++    }
++    case 6: {
++        GCDualSenseAdaptiveTriggerPositionalAmplitudes amplitudes;
++        for (int i = 0; i < GCDualSenseAdaptiveTriggerDiscretePositionCount; ++i) {
++            amplitudes.values[i] = effect[6 + i] / 255.0f;
++        }
++        [trigger setModeVibrationWithAmplitudes:amplitudes frequency:frequency];
++        break;
++    }
++    default:
++        [trigger setModeOff];
++        break;
++    }
+ }
+ 
+ static bool IOS_JoystickSendEffect(SDL_Joystick *joystick, const void *data, int size)
+ {
++    const Uint8 *bytes = (const Uint8 *)data;
++
++    if ((size == 4 || size == 36) && SDL_memcmp(bytes, "CNT1", 4) == 0) {
++        @autoreleasepool {
++            SDL_JoystickDeviceItem *device = joystick->hwdata;
++            if (@available(macOS 12.3, iOS 15.4, tvOS 15.4, *)) {
++                if (device && [device->controller.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]]) {
++                    GCDualSenseGamepad *gamepad = (GCDualSenseGamepad *)device->controller.extendedGamepad;
++                    if (size == 36) {
++                        IOS_ChiakiSetTrigger(gamepad.leftTrigger, &bytes[4]);
++                        IOS_ChiakiSetTrigger(gamepad.rightTrigger, &bytes[20]);
++                    }
++                    return true;
++                }
++            }
++        }
++    }
+     return SDL_Unsupported();
+ }
+ 

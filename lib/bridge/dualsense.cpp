@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <span>
+#include <string_view>
 
 namespace chiaki_bridge {
 
@@ -30,6 +32,84 @@ void DualSenseReport::triggers(Triggers effects, Effect output) noexcept {
   std::ranges::copy(effects.subspan<trigger_half, trigger_half>(),
                     output.begin() + 10);
   std::ranges::copy(effects.first<trigger_half>(), output.begin() + 21);
+}
+
+void DualSenseReport::controller_triggers(Triggers effects,
+                                          std::uint8_t trigger_intensity,
+                                          ControllerTriggers output) noexcept {
+  static constexpr std::array<float, 4> scales{0.0F, 1.0F, 0.625F, 0.4375F};
+  const float scale = scales[trigger_intensity & 3U];
+  std::ranges::copy(std::string_view{"CNT1"}, output.begin());
+  controller_trigger(effects.first<trigger_half>(), scale,
+                     output.subspan<4, controller_trigger_half>());
+  controller_trigger(effects.subspan<trigger_half, trigger_half>(), scale,
+                     output.subspan<4 + controller_trigger_half>());
+}
+
+void DualSenseReport::controller_trigger(
+    std::span<const std::uint8_t, trigger_half> effect, float scale,
+    std::span<std::uint8_t, controller_trigger_half> output) noexcept {
+  std::ranges::fill(output, std::uint8_t{0});
+  const auto scaled = [scale](unsigned value) {
+    return static_cast<std::uint8_t>(
+        std::lround(static_cast<float>(value) * scale));
+  };
+  const auto level = [&scaled](unsigned step) {
+    return scaled(((step & 7U) + 1) * 255 / 8);
+  };
+  const unsigned zones = effect[1] | (effect[2] << 8U);
+  const std::uint32_t packed = effect[3] | (effect[4] << 8U) |
+                               (effect[5] << 16U) |
+                               (static_cast<std::uint32_t>(effect[6]) << 24U);
+  const auto first = static_cast<std::uint8_t>(
+      zones == 0 ? 0 : std::countr_zero(zones) * 255 / 9);
+  const auto last = static_cast<std::uint8_t>(
+      zones == 0 ? 0 : (std::bit_width(zones) - 1) * 255 / 9);
+  switch (effect[0]) {
+    case 0x01:
+      output[0] = 1;
+      output[1] = effect[1];
+      output[3] = scaled(effect[2]);
+      break;
+    case 0x02:
+      output[0] = 2;
+      output[1] = effect[1];
+      output[2] = effect[2];
+      output[3] = scaled(effect[3]);
+      break;
+    case 0x06:
+      output[0] = 3;
+      output[1] = effect[3];
+      output[3] = scaled(effect[2]);
+      output[5] = effect[1];
+      break;
+    case 0x21:
+    case 0x26:
+      output[0] = effect[0] == 0x21 ? 5 : 6;
+      output[5] = effect[0] == 0x26 ? effect[9] : 0;
+      for (std::size_t zone = 0; zone < trigger_zones; ++zone) {
+        if (((zones >> zone) & 1U) != 0) {
+          output[6 + zone] = level(packed >> (3 * zone));
+        }
+      }
+      break;
+    case 0x22:
+    case 0x25:
+      output[0] = 2;
+      output[1] = first;
+      output[2] = last;
+      output[3] = level(effect[3]);
+      break;
+    case 0x23:
+    case 0x27:
+      output[0] = 3;
+      output[1] = first;
+      output[3] = effect[0] == 0x27 ? level(effect[3]) : scaled(255);
+      output[5] = effect[4];
+      break;
+    default:
+      break;
+  }
 }
 
 void DualSenseReport::mic_light(bool lit, Effect output) noexcept {

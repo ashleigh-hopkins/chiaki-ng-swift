@@ -20,6 +20,9 @@ class DualSenseReport {
   static constexpr std::size_t effect_size = 47;
   /// The size of the console's adaptive trigger effects.
   static constexpr std::size_t trigger_size = 22;
+  /// The size of the adaptive trigger effects a GameController DualSense
+  /// takes.
+  static constexpr std::size_t controller_trigger_size = 36;
 
   /// A waveform report.
   using Wave = std::span<std::uint8_t, wave_bytes>;
@@ -29,11 +32,18 @@ class DualSenseReport {
   using Triggers = std::span<const std::uint8_t, trigger_size>;
   /// The interleaved samples of one waveform report.
   using WaveSamples = std::span<const std::int8_t, wave_frames * 2>;
+  /// The adaptive trigger effects of a GameController DualSense.
+  using ControllerTriggers = std::span<std::uint8_t, controller_trigger_size>;
 
   /// Writes the waveform report for the samples.
   static void waveform(WaveSamples samples, Wave output) noexcept;
   /// Writes the effects report that sets the adaptive triggers.
   static void triggers(Triggers effects, Effect output) noexcept;
+  /// Writes the console's adaptive trigger effects in the modes a
+  /// GameController DualSense offers, scaled by the trigger intensity.
+  static void controller_triggers(Triggers effects,
+                                  std::uint8_t trigger_intensity,
+                                  ControllerTriggers output) noexcept;
   /// Writes the effects report that turns the microphone light on or off.
   static void mic_light(bool lit, Effect output) noexcept;
   /// Writes the effects report that sets the microphone's volume and mute.
@@ -51,6 +61,13 @@ class DualSenseReport {
 
  private:
   static constexpr std::size_t trigger_half = trigger_size / 2;
+  static constexpr std::size_t controller_trigger_half =
+      (controller_trigger_size - 4) / 2;
+  static constexpr std::size_t trigger_zones = 10;
+
+  static void controller_trigger(
+      std::span<const std::uint8_t, trigger_half> effect, float scale,
+      std::span<std::uint8_t, controller_trigger_half> output) noexcept;
   static constexpr std::uint8_t speaker_volume_valid = 0x20;
   static constexpr std::uint8_t audio_route_valid = 0x80;
   static constexpr std::uint8_t speaker_volume = 0x60;

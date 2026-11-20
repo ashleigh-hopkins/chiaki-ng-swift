@@ -165,10 +165,57 @@ static int test_effect_reports(void) {
   return 0;
 }
 
+static int test_controller_triggers(void) {
+  std::array<std::uint8_t, DualSenseReport::trigger_size> effects{};
+  std::array<std::uint8_t, DualSenseReport::controller_trigger_size> output{};
+  effects[0] = 0x21;
+  effects[1] = 0x06;
+  effects[3] = 0x38;
+  effects[11] = 0x25;
+  effects[12] = 0x84;
+  effects[14] = 0x03;
+  DualSenseReport::controller_triggers(effects, 1, output);
+  if (std::memcmp(output.data(), "CNT1", 4) != 0) {
+    return 100;
+  }
+  if (output[4] != 5 || output[10] || output[11] != 255 || output[12] != 31 ||
+      output[13]) {
+    return 101;
+  }
+  if (output[20] != 2 || output[21] != 56 || output[22] != 198 ||
+      output[23] != 127) {
+    return 102;
+  }
+  effects = {};
+  effects[0] = 0x26;
+  effects[1] = 0x01;
+  effects[3] = 0x07;
+  effects[9] = 40;
+  effects[11] = 0x01;
+  effects[12] = 64;
+  effects[13] = 200;
+  DualSenseReport::controller_triggers(effects, 2, output);
+  if (output[4] != 6 || output[9] != 40 || output[10] != 159) {
+    return 103;
+  }
+  if (output[20] != 1 || output[21] != 64 || output[23] != 125) {
+    return 104;
+  }
+  effects = {};
+  effects[0] = 0x05;
+  effects[11] = 0x99;
+  DualSenseReport::controller_triggers(effects, 0, output);
+  if (output[4] || output[20]) {
+    return 105;
+  }
+  return 0;
+}
+
 int main(void) {
   int (*tests[])(void) = {
       test_wave_stream,
       test_effect_reports,
+      test_controller_triggers,
   };
   for (size_t index = 0; index < sizeof tests / sizeof tests[0]; index++) {
     int result = tests[index]();
