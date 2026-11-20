@@ -2,6 +2,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <SDL3/SDL.h>
+#include <opus.h>
 #include <pthread.h>
 
 #include <algorithm>
@@ -58,6 +59,8 @@ class InputThread {
   auto enqueue(const nx_input_command& command) -> bool;
   auto waveform(std::uint32_t instance, std::span<const std::uint8_t> pcm,
                 float gain) -> bool;
+  auto microphone(std::uint32_t instance, nx_input_microphone_sink sink,
+                  void* context) -> bool;
 
  private:
   enum class Phase { stopped, starting, running, stopping, failed };
@@ -80,6 +83,13 @@ class InputThread {
   static constexpr std::uint16_t enhanced_firmware = 0x0224;
   static constexpr const char* trigger_state_property =
       "SDL.joystick.chiaki.trigger_state";
+  static constexpr const char* microphone_property =
+      "SDL.joystick.chiaki.microphone";
+  static constexpr const char* microphone_context_property =
+      "SDL.joystick.chiaki.microphone_context";
+  static constexpr std::uint64_t microphone_retry_ms = 250;
+  static constexpr int microphone_rate = 48000;
+  static constexpr int microphone_frames = 960;
 
   struct Entry {
     nx_input_device device{};
@@ -151,6 +161,11 @@ class InputThread {
   void perform_waveform_mode(std::uint32_t instance, bool enabled);
   void pump_waveform();
   auto take_waveform(std::uint64_t now_ms) -> std::optional<Outgoing>;
+  static void heard(void* context, SDL_JoystickID id, const Uint8* opus,
+                    int size);
+  static auto ask_microphone(SDL_Gamepad* gamepad, bool live) -> bool;
+  void perform_microphone(std::uint32_t instance, bool enabled);
+  void pump_microphone();
 
   std::mutex state_mutex_;
   std::condition_variable changed_;
@@ -188,6 +203,14 @@ class InputThread {
   std::size_t trigger_state_count_{};
   bool dualsense_present_{};
   std::optional<Outgoing> outgoing_;
+
+  std::mutex microphone_mutex_;
+  nx_input_microphone_sink microphone_sink_{};
+  void* microphone_context_{};
+  std::uint32_t microphone_instance_{};
+  OpusDecoder* microphone_decoder_{};
+  bool microphone_heard_{};
+  std::uint64_t microphone_asked_ms_{};
 };
 
 auto InputThread::shared() -> InputThread& {
@@ -676,9 +699,11 @@ void InputThread::run() {
     deliver_batch();
     perform_commands();
     pump_waveform();
+    pump_microphone();
     finish_pass();
   }
   perform_commands();
+  perform_microphone(microphone_instance_, false);
   wake_event_.store(0, std::memory_order_release);
   silence_all();
   SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
@@ -803,6 +828,9 @@ void InputThread::remove_pad(SDL_JoystickID id) {
     snapshot_count_ -= removed.size();
   }
   recount_dualsense();
+  if (id == microphone_instance_) {
+    perform_microphone(id, false);
+  }
 }
 
 void InputThread::recount_dualsense() {
@@ -957,6 +985,10 @@ void InputThread::perform(const nx_input_command& command) {
     perform_waveform_mode(command.instance, command.value.enabled);
     return;
   }
+  if (command.kind == NX_INPUT_COMMAND_MICROPHONE) {
+    perform_microphone(command.instance, command.value.enabled);
+    return;
+  }
   SDL_Gamepad* gamepad = SDL_GetGamepadFromID(command.instance);
   if (gamepad == nullptr) {
     return;
@@ -1027,7 +1059,96 @@ void InputThread::perform(const nx_input_command& command) {
       break;
     }
     case NX_INPUT_COMMAND_WAVEFORM_MODE:
+    case NX_INPUT_COMMAND_MICROPHONE:
       break;
+  }
+}
+
+auto InputThread::microphone(std::uint32_t instance,
+                             nx_input_microphone_sink sink, void* context)
+    -> bool {
+  {
+    const std::lock_guard lock(microphone_mutex_);
+    microphone_sink_ = sink;
+    microphone_context_ = context;
+  }
+  auto command = make_command(NX_INPUT_COMMAND_MICROPHONE, instance);
+  command.value.enabled = sink != nullptr;
+  return enqueue(command);
+}
+
+void InputThread::heard(void* context, SDL_JoystickID id, const Uint8* opus,
+                        int size) {
+  auto& thread = *static_cast<InputThread*>(context);
+  if (id != thread.microphone_instance_ ||
+      thread.microphone_decoder_ == nullptr) {
+    return;
+  }
+  thread.microphone_heard_ = true;
+  std::array<float, microphone_frames> samples{};
+  const int count = opus_decode_float(thread.microphone_decoder_, opus, size,
+                                      samples.data(), microphone_frames, 0);
+  const std::lock_guard lock(thread.microphone_mutex_);
+  if (count > 0 && thread.microphone_sink_ != nullptr) {
+    thread.microphone_sink_(samples.data(), count, thread.microphone_context_);
+  }
+}
+
+auto InputThread::ask_microphone(SDL_Gamepad* gamepad, bool live) -> bool {
+  const std::array<std::uint8_t, 8> command{
+      'C', 'N', 'H', '1', static_cast<std::uint8_t>(live ? 3 : 4), 0, 0, 0};
+  return SDL_SendGamepadEffect(gamepad, command.data(), command.size());
+}
+
+void InputThread::perform_microphone(std::uint32_t instance, bool enabled) {
+  SDL_Gamepad* gamepad = SDL_GetGamepadFromID(instance);
+  if (microphone_instance_ != 0 &&
+      (!enabled || microphone_instance_ != instance)) {
+    SDL_Gamepad* previous = SDL_GetGamepadFromID(microphone_instance_);
+    if (previous != nullptr) {
+      std::array<std::uint8_t, effect_size> packet{};
+      DualSenseReport::microphone(false, packet);
+      SDL_SendGamepadEffect(previous, packet.data(), packet.size());
+      ask_microphone(previous, false);
+      SDL_ClearProperty(SDL_GetGamepadProperties(previous),
+                        microphone_property);
+    }
+    opus_decoder_destroy(microphone_decoder_);
+    microphone_decoder_ = nullptr;
+    microphone_instance_ = 0;
+  }
+  if (!enabled || gamepad == nullptr || microphone_instance_ == instance) {
+    return;
+  }
+  int error = OPUS_OK;
+  microphone_decoder_ = opus_decoder_create(microphone_rate, 1, &error);
+  if (error != OPUS_OK) {
+    microphone_decoder_ = nullptr;
+    return;
+  }
+  const SDL_PropertiesID properties = SDL_GetGamepadProperties(gamepad);
+  SDL_SetPointerProperty(properties, microphone_context_property, this);
+  SDL_SetPointerProperty(properties, microphone_property,
+                         reinterpret_cast<void*>(&heard));
+  std::array<std::uint8_t, effect_size> packet{};
+  DualSenseReport::microphone(true, packet);
+  SDL_SendGamepadEffect(gamepad, packet.data(), packet.size());
+  microphone_instance_ = instance;
+  microphone_heard_ = false;
+  microphone_asked_ms_ = SDL_GetTicks();
+  ask_microphone(gamepad, true);
+}
+
+void InputThread::pump_microphone() {
+  const std::uint64_t now = SDL_GetTicks();
+  if (microphone_instance_ == 0 || microphone_heard_ ||
+      now - microphone_asked_ms_ < microphone_retry_ms) {
+    return;
+  }
+  SDL_Gamepad* gamepad = SDL_GetGamepadFromID(microphone_instance_);
+  if (gamepad != nullptr) {
+    microphone_asked_ms_ = now;
+    ask_microphone(gamepad, true);
   }
 }
 
@@ -1226,6 +1347,16 @@ bool nx_input_dualsense_speaker(uint32_t instance, bool enabled) {
       NX_INPUT_COMMAND_SPEAKER, instance);
   command.value.enabled = enabled;
   return chiaki_bridge::InputThread::shared().enqueue(command);
+}
+
+bool nx_input_microphone(uint32_t instance, nx_input_microphone_sink sink,
+                         void* context) {
+  const auto traits = chiaki_bridge::InputThread::shared().traits(instance);
+  if (sink != nullptr && (!traits || !traits->waveform)) {
+    return false;
+  }
+  return chiaki_bridge::InputThread::shared().microphone(instance, sink,
+                                                         context);
 }
 
 void nx_input_reset_feedback(uint32_t instance) {

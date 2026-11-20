@@ -1,5 +1,6 @@
 import AVFoundation
 import AudioToolbox
+import CInput
 import Foundation
 #if os(macOS)
     import CoreAudio
@@ -24,12 +25,29 @@ public enum MicrophoneInputDevices {
         let name: String
     }
 
-    /// Returns the names of every available input, without duplicates, in system order.
+    /// The name of the microphone in a DualSense connected over Bluetooth.
+    public static let controllerName = "DualSense microphone"
+
+    /// Returns the names of every available input, without duplicates, in system order, then the microphone of
+    /// a DualSense connected over Bluetooth.
     public static func names() -> [String] {
         var seen = Set<String>()
-        return devices().map(\.name).filter {
+        let names = devices().map(\.name).filter {
             seen.insert($0).inserted
         }
+        return controller() == nil
+            ? names
+            : names + [controllerName]
+    }
+
+    /// Finds a controller whose microphone can be captured over Bluetooth.
+    /// - Returns: The controller's SDL instance id, or `nil` when none is connected.
+    public static func controller() -> UInt32? {
+        var devices = [nx_input_device](repeating: nx_input_device(), count: 32)
+        let count = Int(nx_input_devices(&devices, Int32(devices.count)))
+        return devices.prefix(max(0, count)).first {
+            $0.waveform
+        }?.instance
     }
 
     /// Looks up an available input by its display name.

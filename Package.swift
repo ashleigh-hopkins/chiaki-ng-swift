@@ -208,6 +208,7 @@ let package = Package(
                 "ChiakiPersistence",
                 "ChiakiCoreBridge",
                 "ChiakiBridge",
+                "CInput",
                 "PlatformUI",
                 "Video",
                 composableArchitecture,

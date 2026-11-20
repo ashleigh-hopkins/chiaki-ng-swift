@@ -38,6 +38,14 @@ void DualSenseReport::mic_light(bool lit, Effect output) noexcept {
   output[8] = lit ? 0x01 : 0x00;
 }
 
+void DualSenseReport::microphone(bool live, Effect output) noexcept {
+  std::ranges::fill(output, std::uint8_t{0});
+  output[0] = mic_volume_valid;
+  output[1] = mic_mute_valid;
+  output[6] = live ? mic_volume : 0;
+  output[9] = live ? 0 : mic_muted;
+}
+
 void DualSenseReport::speaker(bool enabled, Effect output) noexcept {
   std::ranges::fill(output, std::uint8_t{0});
   output[0] = speaker_volume_valid | audio_route_valid;

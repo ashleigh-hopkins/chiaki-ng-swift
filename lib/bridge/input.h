@@ -60,6 +60,10 @@ bool nx_input_dualsense_rumble(uint32_t instance, uint8_t left, uint8_t right,
                                uint8_t haptic_intensity);
 bool nx_input_switch_rumble(uint32_t instance, const float amplitude[2]);
 bool nx_input_mic_light(uint32_t instance, bool lit);
+typedef void (*nx_input_microphone_sink)(const float* samples, int count,
+                                         void* context);
+bool nx_input_microphone(uint32_t instance, nx_input_microphone_sink sink,
+                         void* context);
 bool nx_input_dualsense_speaker(uint32_t instance, bool enabled);
 void nx_input_reset_feedback(uint32_t instance);
 bool nx_input_light(uint32_t instance, uint32_t rgb);

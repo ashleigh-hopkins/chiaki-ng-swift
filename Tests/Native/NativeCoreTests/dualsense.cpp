@@ -151,6 +151,17 @@ static int test_effect_reports(void) {
   if (speaker[0] != 0xa0 || speaker[5] || speaker[7]) {
     return 81;
   }
+  Effect microphone{};
+  DualSenseReport::microphone(true, microphone);
+  if (microphone[0] != 0x40 || microphone[1] != 0x02 || microphone[6] != 0x40 ||
+      microphone[9] || microphone[7] || microphone[8]) {
+    return 90;
+  }
+  DualSenseReport::microphone(false, microphone);
+  if (microphone[0] != 0x40 || microphone[1] != 0x02 || microphone[6] ||
+      microphone[9] != 0x10) {
+    return 91;
+  }
   return 0;
 }
 

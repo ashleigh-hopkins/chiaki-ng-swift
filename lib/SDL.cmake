@@ -28,7 +28,7 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -DSDL_SOURCE=${sdl3_SOURCE_DIR}
     -DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/patches/sdl3-dualsense-trigger-state.patch
     -P "${CMAKE_CURRENT_LIST_DIR}/patches/ApplySDL.cmake" COMMAND_ERROR_IS_FATAL ANY)
 add_library(ChiakiInput SHARED bridge/input.cpp bridge/input_commands.cpp bridge/dualsense.cpp bridge/switch_rumble.cpp)
-target_link_libraries(ChiakiInput PRIVATE SDL3::SDL3 "-framework CoreFoundation")
+target_link_libraries(ChiakiInput PRIVATE SDL3::SDL3 PkgConfig::LIBCHIAKING_OPUS "-framework CoreFoundation")
 target_compile_features(ChiakiInput PRIVATE cxx_std_20)
 set_target_properties(ChiakiInput PROPERTIES INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR TRUE)
 if(CMAKE_CROSSCOMPILING)
@@ -37,7 +37,7 @@ endif()
 add_executable(chiaki-input-test ../Tests/Native/NativeCoreTests/input.c bridge/input.cpp bridge/input_commands.cpp
     bridge/dualsense.cpp bridge/switch_rumble.cpp)
 target_include_directories(chiaki-input-test PRIVATE bridge)
-target_link_libraries(chiaki-input-test PRIVATE SDL3::SDL3 "-framework CoreFoundation")
+target_link_libraries(chiaki-input-test PRIVATE SDL3::SDL3 PkgConfig::LIBCHIAKING_OPUS "-framework CoreFoundation")
 target_compile_features(chiaki-input-test PRIVATE cxx_std_20)
 add_test(NAME chiaki-input-test COMMAND chiaki-input-test)
 add_executable(chiaki-dualsense-test ../Tests/Native/NativeCoreTests/dualsense.cpp bridge/dualsense.cpp)

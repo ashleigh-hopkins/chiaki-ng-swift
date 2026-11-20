@@ -7,6 +7,7 @@ import ChiakiClientsLive
 import ChiakiCoreBridge
 import ChiakiDiagnostics
 import ChiakiModels
+import CInput
 import Dependencies
 import Foundation
 import Video
@@ -330,6 +331,73 @@ final class MicrophoneEncoderPipeline: @unchecked Sendable {
     }
 }
 
+/// A source of microphone audio that can be started, paused and stopped.
+protocol MicrophoneSource: AnyObject {
+    /// Whether the source is delivering audio.
+    var isRunning: Bool { get }
+    /// Starts or resumes delivering audio.
+    func start() throws
+    /// Stops delivering audio until started again.
+    func pause()
+    /// Stops delivering audio.
+    func stop()
+}
+
+extension AVAudioEngine: MicrophoneSource {}
+
+/// Captures the microphone of a DualSense connected over Bluetooth, which sends its audio inside its input reports.
+final class ControllerMicrophone: MicrophoneSource, @unchecked Sendable {
+    /// The format the controller's decoded audio arrives in.
+    static let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)
+    private let instance: UInt32
+    private let pipeline: MicrophoneEncoderPipeline
+    private let format: AVAudioFormat
+    private(set) var isRunning = false
+
+    /// Creates a source for a controller that feeds the pipeline once started.
+    /// - Parameters:
+    ///   - instance: The controller's SDL instance id.
+    ///   - pipeline: The pipeline that encodes the audio.
+    ///   - format: The format of the audio the pipeline takes.
+    init(instance: UInt32, pipeline: MicrophoneEncoderPipeline, format: AVAudioFormat) {
+        self.instance = instance
+        self.pipeline = pipeline
+        self.format = format
+    }
+
+    func start() throws {
+        guard nx_input_microphone(instance, Self.receive, Unmanaged.passUnretained(self).toOpaque()) else {
+            throw CocoaError(.featureUnsupported)
+        }
+        isRunning = true
+    }
+
+    func pause() {
+        stop()
+    }
+
+    func stop() {
+        _ = nx_input_microphone(instance, nil, nil)
+        isRunning = false
+    }
+
+    private static let receive: nx_input_microphone_sink = { samples, count, context in
+        guard let samples, let context, count > 0 else {
+            return
+        }
+        let microphone = Unmanaged<ControllerMicrophone>.fromOpaque(context).takeUnretainedValue()
+        var list = AudioBufferList(
+            mNumberBuffers: 1,
+            mBuffers: AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(Int(count) * MemoryLayout<Float>.size),
+                mData: UnsafeMutableRawPointer(mutating: samples)
+            )
+        )
+        _ = microphone.pipeline.process(&list, format: microphone.format)
+    }
+}
+
 /// Owns the audio engine that captures the microphone for the live stream, handling the console's connection
 /// handshake, mute and unmute, device changes and teardown for one operation at a time.
 @MainActor final class MicrophoneCapture {
@@ -343,16 +411,16 @@ final class MicrophoneEncoderPipeline: @unchecked Sendable {
     }
 
     private struct Capture {
-        let engine: AVAudioEngine
-        let sink: AVAudioSinkNode
+        let engine: any MicrophoneSource
+        let sink: AVAudioSinkNode?
         let format: AVAudioFormat
-        let observer: NSObjectProtocol
+        let observer: NSObjectProtocol?
         var state = CaptureState.running
     }
 
     private struct OpenedEngine: @unchecked Sendable {
-        let engine: AVAudioEngine
-        let sink: AVAudioSinkNode
+        let engine: any MicrophoneSource
+        let sink: AVAudioSinkNode?
         let format: AVAudioFormat
     }
 
@@ -584,15 +652,18 @@ final class MicrophoneEncoderPipeline: @unchecked Sendable {
         guard let capture else {
             return
         }
-        NotificationCenter.default.removeObserver(capture.observer)
+        if let observer = capture.observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
         Self.stopEngine(OpenedEngine(engine: capture.engine, sink: capture.sink, format: capture.format))
     }
 
     private func configurationChanged(_ operation: UUID) {
-        guard let current = session, current.operation == operation, let capture = current.capture else {
+        guard let current = session, current.operation == operation, let capture = current.capture,
+              let engine = capture.engine as? AVAudioEngine else {
             return
         }
-        let format = capture.engine.inputNode.outputFormat(forBus: 0)
+        let format = engine.inputNode.outputFormat(forBus: 0)
         let selectedMissing = current.inputDevice.map {
             MicrophoneInputDevices.device(named: $0) == nil
         } ?? false
@@ -601,11 +672,11 @@ final class MicrophoneEncoderPipeline: @unchecked Sendable {
             current.interrupted(.inputChanged)
             return
         }
-        guard capture.state == .running, !capture.engine.isRunning else {
+        guard capture.state == .running, !engine.isRunning else {
             return
         }
         do {
-            try capture.engine.start()
+            try engine.start()
         } catch {
             current.interrupted(.stopped(LogFormat.error(error)))
         }
@@ -640,6 +711,9 @@ extension MicrophoneCapture {
     }
 
     private nonisolated static func open(inputDevice: String?, sink: MicrophoneFrameSink) -> Opening {
+        if inputDevice == MicrophoneInputDevices.controllerName {
+            return openController(sink: sink)
+        }
         let engine = AVAudioEngine()
         let processing = prepare(engine.inputNode, inputDevice: inputDevice)
         let format = engine.inputNode.outputFormat(forBus: 0)
@@ -666,22 +740,47 @@ extension MicrophoneCapture {
         return .opened(OpenedEngine(engine: engine, sink: sink, format: format))
     }
 
+    private nonisolated static func openController(sink: MicrophoneFrameSink) -> Opening {
+        guard let instance = MicrophoneInputDevices.controller(),
+              let format = ControllerMicrophone.format else {
+            return .failed(.noInput)
+        }
+        guard let pipeline = MicrophoneEncoderPipeline(input: format, processing: .raw, sink: sink) else {
+            return .failed(.encoderFailed)
+        }
+        let microphone = ControllerMicrophone(instance: instance, pipeline: pipeline, format: format)
+        do {
+            try microphone.start()
+        } catch {
+            return .failed(.startFailed(LogFormat.error(error)))
+        }
+        report(
+            .info,
+            "Microphone capture opened from the DualSense over Bluetooth, sending 48 kHz Opus to the console"
+        )
+        return .opened(OpenedEngine(engine: microphone, sink: nil, format: format))
+    }
+
     private nonisolated static func stopEngine(_ opened: OpenedEngine) {
         audioQueue.async {
             opened.engine.stop()
-            opened.engine.disconnectNodeInput(opened.sink)
-            opened.engine.detach(opened.sink)
+            if let engine = opened.engine as? AVAudioEngine, let sink = opened.sink {
+                engine.disconnectNodeInput(sink)
+                engine.detach(sink)
+            }
         }
     }
 
     private func install(_ opened: OpenedEngine, operation: UUID) -> Capture {
-        let observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: opened.engine,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.configurationChanged(operation)
+        let observer = (opened.engine as? AVAudioEngine).map { engine in
+            NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.configurationChanged(operation)
+                }
             }
         }
         return Capture(engine: opened.engine, sink: opened.sink, format: opened.format, observer: observer)

@@ -36,6 +36,8 @@ class DualSenseReport {
   static void triggers(Triggers effects, Effect output) noexcept;
   /// Writes the effects report that turns the microphone light on or off.
   static void mic_light(bool lit, Effect output) noexcept;
+  /// Writes the effects report that sets the microphone's volume and mute.
+  static void microphone(bool live, Effect output) noexcept;
   /// Writes the effects report that routes audio to the speaker or not.
   static void speaker(bool enabled, Effect output) noexcept;
   /// The power reduction byte for the console's trigger and haptic
@@ -54,6 +56,10 @@ class DualSenseReport {
   static constexpr std::uint8_t speaker_volume = 0x60;
   static constexpr std::uint8_t output_path_shift = 4;
   static constexpr std::uint8_t speaker_from_right = 3;
+  static constexpr std::uint8_t mic_volume_valid = 0x40;
+  static constexpr std::uint8_t mic_mute_valid = 0x02;
+  static constexpr std::uint8_t mic_volume = 0x40;
+  static constexpr std::uint8_t mic_muted = 0x10;
 };
 
 /// Holds the haptic audio waiting to go to a DualSense, a waveform report at a

@@ -19,7 +19,8 @@ typedef enum {
   NX_INPUT_COMMAND_PLAYER,
   NX_INPUT_COMMAND_MOTION,
   NX_INPUT_COMMAND_WAVEFORM_MODE,
-  NX_INPUT_COMMAND_RESET_FEEDBACK
+  NX_INPUT_COMMAND_RESET_FEEDBACK,
+  NX_INPUT_COMMAND_MICROPHONE
 } nx_input_command_kind;
 typedef struct {
   nx_input_command_kind kind;

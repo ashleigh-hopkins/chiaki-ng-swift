@@ -4,6 +4,8 @@ This is a project-local modification of SDL 3.4.16, not an upstream SDL feature.
 
 The PS5 HIDAPI driver recognizes an application-specific eight-byte CNH1 command. Operation zero probes without writing to hardware, one enables experimental waveform output, and two disables it and expires pending waveform requests. Only PlayStation controllers 054c:0ce6 and 054c:0df2 over Bluetooth pass this gate. Regular applications and controllers retain the ordinary effect path unless explicitly enabled.
 
+Operations three and four turn the controller microphone on and off with a 142-byte report 0x32 that carries only the 0x11 sub-packet, its first flag byte's bit 0 set for on. While on, waveform reports keep that bit set. A Bluetooth 0x31 input report whose second byte has bit 1 set carries a 71-byte Opus microphone packet at byte 3; the driver hands it to the function in the joystick's `SDL.joystick.chiaki.microphone` property and never reads it as pad input.
+
 Operation one is idempotent: enabling an already enabled controller succeeds without another write, so a stream that regains focus keeps its Bluetooth route. The neutral effect that enters waveform mode is queued before the mode is set, so it is not subject to the waveform queue limit.
 
 The extension accepts 78-byte report 0x31 carrying two sub-packets: 0x11 (header 0x91, length 6, flags 0x7e, four start-threshold bytes and a counter) and 0x12 (header 0x92, length in bytes, at most 62 bytes, 31 stereo frames). The driver owns the shared four-bit sequence, the counter and the CRC. While enabled, ordinary state effects preserve native haptic selection and zero motor amplitudes. Both packet types use SDL's existing HID worker and device lifetime lock; no second raw-HID writer opens the controller.
