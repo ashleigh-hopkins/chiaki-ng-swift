@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <math.h>
+#import <stdatomic.h>
+#import <unistd.h>
 #import "FrameInterpolationClient.h"
 
 typedef struct {
@@ -81,6 +83,107 @@ static BOOL testInterpolation(CVPixelBufferRef first, CVPixelBufferRef second,
   [client stop];
   return outputs == expectedOutputs && generated == expectedGenerated &&
          [statistics[@"generated"] unsignedIntegerValue] == expectedGenerated;
+}
+
+// Offers a 1080p60 stream at its real pace. Every decoded frame must come out, in order, each
+// after at most one interpolated frame, and none may be held back longer than three frame
+// intervals once the first half second has passed. Nothing may be delivered after stop returns.
+// How many frames are interpolated depends on the GPU and its load, so it is only reported
+// (VIDEO_EFFECTS_VERBOSE=1).
+static BOOL testPacedStream(void) {
+  enum { kFrames = 16, kRate = 60, kOffered = kRate * 3, kWarmUp = kRate / 2 };
+  CVPixelBufferRef *frames = calloc(kFrames, sizeof(CVPixelBufferRef));
+  for (int index = 0; index < kFrames; index++) {
+    frames[index] = makeFrame(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    if (!frames[index]) {
+      return NO;
+    }
+    CVPixelBufferLockBaseAddress(frames[index], 0);
+    uint8_t *luma = CVPixelBufferGetBaseAddressOfPlane(frames[index], 0);
+    size_t stride = CVPixelBufferGetBytesPerRowOfPlane(frames[index], 0);
+    for (size_t row = 0; row < 1080; row++) {
+      memset(luma + row * stride + (index * 8 + row / 4) % 512, 175, 128);
+    }
+    CVPixelBufferUnlockBaseAddress(frames[index], 0);
+  }
+  CNFrameInterpolationClient *client = [CNFrameInterpolationClient new];
+  [client setSourceFrameRate:kRate];
+  [client setEnabled:YES];
+  double *offeredAt = calloc(kOffered, sizeof(double));
+  __block NSUInteger decoded = 0;
+  __block NSUInteger generated = 0;
+  __block NSUInteger generatedInARow = 0;
+  __block BOOL ordered = YES;
+  __block BOOL afterStop = NO;
+  __block double longestHold = 0;
+  __block double warmUpHold = 0;
+  __block _Atomic BOOL stopped = NO;
+  dispatch_queue_t sink = dispatch_queue_create("video-effects-probe.sink", DISPATCH_QUEUE_SERIAL);
+  CNInterpolatedFrameHandler handler = ^(CVPixelBufferRef frame, BOOL synthetic) {
+    double now = NSProcessInfo.processInfo.systemUptime;
+    BOOL late = atomic_load(&stopped);
+    dispatch_sync(sink, ^{
+      afterStop = afterStop || late;
+      if (synthetic) {
+        generated++;
+        generatedInARow++;
+        ordered = ordered && generatedInARow == 1;
+        return;
+      }
+      ordered = ordered && frame == frames[decoded % kFrames];
+      if (decoded < kOffered) {
+        double hold = now - offeredAt[decoded];
+        if (decoded < kWarmUp) {
+          warmUpHold = MAX(warmUpHold, hold);
+        } else {
+          longestHold = MAX(longestHold, hold);
+        }
+      }
+      decoded++;
+      generatedInARow = 0;
+    });
+  };
+  double start = NSProcessInfo.processInfo.systemUptime;
+  for (int index = 0; index < kOffered; index++) {
+    double wait = start + (double)index / kRate - NSProcessInfo.processInfo.systemUptime;
+    if (wait > 0) {
+      usleep((useconds_t)(wait * 1e6));
+    }
+    offeredAt[index] = NSProcessInfo.processInfo.systemUptime;
+    [client offer:frames[index % kFrames] handler:handler];
+  }
+  usleep(200000);
+  __block NSUInteger decodedBeforeStop = 0;
+  __block NSUInteger generatedBeforeStop = 0;
+  dispatch_sync(sink, ^{
+    decodedBeforeStop = decoded;
+    generatedBeforeStop = generated;
+  });
+  // Stop while interpolations are running.
+  for (int index = 0; index < 4; index++) {
+    [client offer:frames[(kOffered + index) % kFrames] handler:handler];
+  }
+  [client stop];
+  atomic_store(&stopped, YES);
+  usleep(200000);
+  for (int index = 0; index < kFrames; index++) {
+    CVPixelBufferRelease(frames[index]);
+  }
+  free(frames);
+  __block BOOL passed = NO;
+  dispatch_sync(sink, ^{
+    free(offeredAt);
+    passed = decodedBeforeStop == kOffered && ordered && !afterStop && generatedBeforeStop > 0 &&
+             longestHold < 3.0 / kRate;
+  });
+  if (!passed || getenv("VIDEO_EFFECTS_VERBOSE")) {
+    fprintf(stderr,
+            "paced 1080p60: decoded %lu/%d generated %lu ordered=%d afterStop=%d "
+            "longest hold %.1f ms (warm-up %.1f ms)\n",
+            (unsigned long)decodedBeforeStop, kOffered, (unsigned long)generatedBeforeStop, ordered,
+            afterStop, longestHold * 1000, warmUpHold * 1000);
+  }
+  return passed;
 }
 
 static BOOL runColour(id<MTLDevice> device, id<MTLLibrary> library, ColourConfig config,
@@ -526,17 +629,19 @@ int main(int argc, const char *argv[]) {
     }
     BOOL interpolation = testInterpolation(first, second, 1);
     BOOL tenBitFallback = testInterpolation(tenBitFirst, tenBitSecond, 0);
+    BOOL pacedStream = testPacedStream();
     BOOL diagnostics = testColourDiagnostics(@(argv[1]));
     CVPixelBufferRelease(first);
     CVPixelBufferRelease(second);
     CVPixelBufferRelease(tenBitFirst);
     CVPixelBufferRelease(tenBitSecond);
-    if (!interpolation || !tenBitFallback || !diagnostics) {
-      fprintf(stderr, "FAIL: interpolation=%d tenBitFallback=%d diagnostics=%d\n", interpolation,
-              tenBitFallback, diagnostics);
+    if (!interpolation || !tenBitFallback || !pacedStream || !diagnostics) {
+      fprintf(stderr, "FAIL: interpolation=%d tenBitFallback=%d pacedStream=%d diagnostics=%d\n",
+              interpolation, tenBitFallback, pacedStream, diagnostics);
       return 1;
     }
-    printf("PASS: frame generation, Main10 fallback, HDR diagnostics, picture adjustments, "
+    printf("PASS: frame generation, paced 1080p60 delivery, Main10 fallback, HDR diagnostics, "
+           "picture adjustments, "
            "debanding and highlight roll-off\n");
     return 0;
   }
