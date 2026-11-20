@@ -1,6 +1,6 @@
 --- a/src/joystick/hidapi/SDL_hidapi_ps5.c
 +++ b/src/joystick/hidapi/SDL_hidapi_ps5.c
-@@ -250,6 +250,12 @@
+@@ -250,6 +250,10 @@
      int player_index;
      bool player_lights;
      bool enhanced_rumble;
@@ -8,12 +8,10 @@
 +    bool chiaki_microphone;
 +    Uint8 chiaki_sequence;
 +    Uint8 chiaki_counter;
-+    SDL_AtomicInt chiaki_credit;
-+    SDL_AtomicInt chiaki_level;
      Uint8 rumble_left;
      Uint8 rumble_right;
      bool color_set;
-@@ -1098,7 +1104,7 @@
+@@ -1098,7 +1102,7 @@
  
      if (ctx->device->is_bluetooth) {
          data[0] = k_EPS5ReportIdBluetoothEffects;
@@ -22,20 +20,20 @@
          data[2] = 0x10; // Magic value
  
          report_size = 78;
-@@ -1112,6 +1118,12 @@
+@@ -1111,6 +1115,12 @@
+     }
  
      SDL_memcpy(&data[offset], effect, SDL_min((sizeof(data) - offset), (size_t)size));
- 
++
 +    if (ctx->chiaki_waveform) {
 +        data[offset] = (data[offset] & (Uint8)~3) | 1;
 +        data[offset + 2] = data[offset + 3] = 0;
 +        data[offset + 38] &= (Uint8)~12;
 +    }
-+
+ 
      if (ctx->device->is_bluetooth) {
          // Bluetooth reports need a CRC at the end of the packet (at least on Linux)
-         Uint8 ubHdr = 0xA2; // hidp header is part of the CRC calculation
-@@ -1123,10 +1135,15 @@
+@@ -1123,10 +1133,15 @@
  
      if (!SDL_HIDAPI_LockRumble()) {
          return false;
@@ -52,7 +50,7 @@
          DS5EffectsState_t *effects = (DS5EffectsState_t *)&data[offset];
          DS5EffectsState_t *pending_effects = (DS5EffectsState_t *)&pending_data[offset];
          if (report_size == *pending_size &&
-@@ -1150,6 +1167,99 @@
+@@ -1150,6 +1165,89 @@
  {
      SDL_DriverPS5_Context *ctx = (SDL_DriverPS5_Context *)device->context;
  
@@ -102,8 +100,6 @@
 +            if (!HIDAPI_DriverPS5_InternalSendJoystickEffect(ctx, restore, sizeof(restore), true)) {
 +                return false;
 +            }
-+            SDL_SetAtomicInt(&ctx->chiaki_credit, 2);
-+            SDL_SetAtomicInt(&ctx->chiaki_level, 0);
 +            ctx->chiaki_waveform = true;
 +        } else {
 +            ctx->chiaki_waveform = false;
@@ -114,19 +110,12 @@
 +        }
 +        return true;
 +    }
-+    if (size == 78 && bytes[0] == 0x31 && bytes[2] == 0x91) {
-+        Uint8 packet[78];
++    if (size == 142 && bytes[0] == 0x32 && bytes[2] == 0x91 && bytes[8] == 0xd2) {
++        Uint8 packet[142];
 +        Uint8 prefix = 0xa2;
 +        Uint32 crc;
-+        if (!supported || !ctx->chiaki_waveform || bytes[3] != 6 || bytes[4] != 0x7e ||
-+            bytes[10] != 0x92 || bytes[11] < 2 || bytes[11] > 62 || (bytes[11] & 1)) {
++        if (!supported || !ctx->chiaki_waveform || bytes[3] != 4 || bytes[9] != 64) {
 +            return SDL_Unsupported();
-+        }
-+        if (SDL_GetAtomicInt(&ctx->chiaki_level) > 40) {
-+            return SDL_SetError("Chiaki waveform buffer ahead");
-+        }
-+        if (SDL_GetAtomicInt(&ctx->chiaki_credit) <= 0) {
-+            return SDL_SetError("Chiaki waveform link busy");
 +        }
 +        if (!SDL_HIDAPI_LockRumble()) {
 +            return false;
@@ -135,24 +124,23 @@
 +            SDL_HIDAPI_UnlockRumble();
 +            return SDL_SetError("Chiaki waveform queue full");
 +        }
-+        SDL_AddAtomicInt(&ctx->chiaki_credit, -1);
 +        SDL_memcpy(packet, bytes, sizeof(packet));
 +        packet[1] = (ctx->chiaki_sequence++ & 15) << 4;
 +        packet[4] |= ctx->chiaki_microphone;
-+        packet[9] = ctx->chiaki_counter;
++        packet[7] = ctx->chiaki_counter;
 +        ctx->chiaki_counter += 2;
 +        crc = SDL_crc32(0, &prefix, 1);
-+        crc = SDL_crc32(crc, packet, 74);
-+        packet[74] = (Uint8)crc;
-+        packet[75] = (Uint8)(crc >> 8);
-+        packet[76] = (Uint8)(crc >> 16);
-+        packet[77] = (Uint8)(crc >> 24);
++        crc = SDL_crc32(crc, packet, 138);
++        packet[138] = (Uint8)crc;
++        packet[139] = (Uint8)(crc >> 8);
++        packet[140] = (Uint8)(crc >> 16);
++        packet[141] = (Uint8)(crc >> 24);
 +        return SDL_HIDAPI_SendRumbleAndUnlock(device, packet, sizeof(packet)) == sizeof(packet);
 +    }
      return HIDAPI_DriverPS5_InternalSendJoystickEffect(ctx, effect, size, true);
  }
  
-@@ -1627,8 +1737,25 @@
+@@ -1627,6 +1725,17 @@
              }
              break;
          case k_EPS5ReportIdBluetoothState:
@@ -169,15 +157,7 @@
 +            }
              // This is the extended report, we can enable effects now in auto mode
              HIDAPI_DriverPS5_UpdateEnhancedModeOnEnhancedReport(ctx);
-+            if (ctx->chiaki_waveform && size > 65) {
-+                SDL_SetAtomicInt(&ctx->chiaki_level, data[65]);
-+                if (SDL_GetAtomicInt(&ctx->chiaki_credit) < 2) {
-+                    SDL_AddAtomicInt(&ctx->chiaki_credit, 1);
-+                }
-+            }
  
-             if (ctx->use_alternate_report) {
-                 HIDAPI_DriverPS5_HandleStatePacketAlt(joystick, device->dev, ctx, (PS5StatePacketAlt_t *)&data[2], timestamp);
 --- a/src/joystick/hidapi/SDL_hidapi_rumble.c
 +++ b/src/joystick/hidapi/SDL_hidapi_rumble.c
 @@ -31,7 +31,8 @@
@@ -236,7 +216,7 @@
      request->device = device;
      SDL_memcpy(request->data, data, size);
      request->size = size;
-+    if (size == 78 && data[0] == 0x31 && data[2] == 0x91) {
++    if (size == 142 && data[0] == 0x32 && data[8] == 0xd2) {
 +        request->chiaki_deadline = SDL_GetTicksNS() + SDL_MS_TO_NS(40);
 +    }
      request->callback = callback;

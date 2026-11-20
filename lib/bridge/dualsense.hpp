@@ -11,11 +11,11 @@ namespace chiaki_bridge {
 class DualSenseReport {
  public:
   /// The size of a haptic waveform report.
-  static constexpr std::size_t wave_bytes = 78;
+  static constexpr std::size_t wave_bytes = 142;
   /// The stereo frames a waveform report carries.
-  static constexpr std::size_t wave_frames = 31;
-  /// The interval a waveform report asks the pad to play it over.
-  static constexpr std::uint8_t wave_target_ms = 16;
+  static constexpr std::size_t wave_frames = 64;
+  /// The haptic audio the pad buffers, as the waveform report asks.
+  static constexpr std::uint8_t wave_buffer = 48;
   /// The size of an effects report.
   static constexpr std::size_t effect_size = 47;
   /// The size of the console's adaptive trigger effects.
@@ -85,15 +85,24 @@ class WaveStream {
  public:
   /// How long held audio stays playable without new audio.
   static constexpr std::uint64_t stale_ms = 30;
+  /// How often a waveform report is due while playing: its frames at 3 kHz.
+  static constexpr std::uint64_t period_ns =
+      DualSenseReport::wave_frames * 1'000'000'000ULL / 3000;
+  /// The audio held before playing starts.
+  static constexpr std::size_t prefill_frames = 96;
 
   /// Drops everything held.
   void reset() noexcept;
+  /// Whether the next waveform report is due, starting once enough audio is
+  /// held, then one report per period of the clock.
+  auto due(std::uint64_t now_ns) noexcept -> bool;
   /// Drops the held audio when it went stale.
   void expire(std::uint64_t now_ms) noexcept;
   /// Adds 16-bit stereo audio scaled by the gain, giving whether it was taken.
   auto push(std::span<const std::uint8_t> pcm, float gain,
             std::uint64_t now_ms) noexcept -> bool;
-  /// Writes the next waveform report, giving whether enough audio was held.
+  /// Writes the next waveform report, padded with silence, giving whether any
+  /// audio was held.
   auto peek(DualSenseReport::Wave output) const noexcept -> bool;
   /// Drops the audio of the report `peek` wrote.
   void consume() noexcept;
@@ -103,7 +112,8 @@ class WaveStream {
  private:
   static constexpr std::size_t channels = 2;
   static constexpr std::size_t bytes_per_frame = channels * 2;
-  static constexpr std::size_t capacity = 96;
+  static constexpr std::size_t capacity = 192;
+  static constexpr std::uint64_t resync_periods = 4;
   static constexpr int gate_peak = 2;
   static constexpr float largest_gain = 4.0F;
 
@@ -118,6 +128,8 @@ class WaveStream {
   std::array<std::int8_t, capacity * channels> samples_{};
   std::size_t frames_{};
   std::uint64_t updated_ms_{};
+  bool playing_{};
+  std::uint64_t due_ns_{};
 };
 
 }  // namespace chiaki_bridge

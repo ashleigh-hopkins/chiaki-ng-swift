@@ -14,14 +14,15 @@ namespace chiaki_bridge {
 
 void DualSenseReport::waveform(WaveSamples samples, Wave output) noexcept {
   std::ranges::fill(output, std::uint8_t{0});
-  output[0] = 0x31;
+  output[0] = 0x32;
   output[2] = 0x91;
-  output[3] = 6;
-  output[4] = 0x7e;
-  std::fill_n(output.begin() + 5, 4, wave_target_ms);
-  output[10] = 0x92;
-  output[11] = wave_frames * 2;
-  std::ranges::transform(samples, output.begin() + 12, [](std::int8_t value) {
+  output[3] = 4;
+  output[4] = 0x66;
+  output[5] = wave_buffer;
+  output[6] = wave_buffer;
+  output[8] = 0xd2;
+  output[9] = wave_frames;
+  std::ranges::transform(samples, output.begin() + 10, [](std::int8_t value) {
     return static_cast<std::uint8_t>(value);
   });
 }
@@ -170,6 +171,27 @@ void DualSenseReport::rumble(std::uint8_t left, std::uint8_t right,
 void WaveStream::reset() noexcept {
   frames_ = 0;
   updated_ms_ = 0;
+  playing_ = false;
+}
+
+auto WaveStream::due(std::uint64_t now_ns) noexcept -> bool {
+  if (!playing_) {
+    if (frames_ < prefill_frames) {
+      return false;
+    }
+    playing_ = true;
+    due_ns_ = now_ns;
+  }
+  if (frames_ == 0) {
+    playing_ = false;
+    return false;
+  }
+  if (now_ns < due_ns_) {
+    return false;
+  }
+  due_ns_ = now_ns - due_ns_ > resync_periods * period_ns ? now_ns + period_ns
+                                                          : due_ns_ + period_ns;
+  return true;
 }
 
 void WaveStream::expire(std::uint64_t now_ms) noexcept {
@@ -250,22 +272,21 @@ auto WaveStream::push(std::span<const std::uint8_t> pcm, float gain,
 }
 
 auto WaveStream::peek(DualSenseReport::Wave output) const noexcept -> bool {
-  if (frames_ < DualSenseReport::wave_frames) {
+  if (frames_ == 0) {
     return false;
   }
-  DualSenseReport::waveform(
-      DualSenseReport::WaveSamples{samples_.data(),
-                                   DualSenseReport::wave_frames * 2},
-      output);
+  std::array<std::int8_t, DualSenseReport::wave_frames * channels> samples{};
+  std::copy_n(samples_.begin(),
+              std::min(frames_, DualSenseReport::wave_frames) * channels,
+              samples.begin());
+  DualSenseReport::waveform(samples, output);
   return true;
 }
 
 void WaveStream::consume() noexcept {
-  if (frames_ < DualSenseReport::wave_frames) {
-    return;
-  }
-  const std::size_t remaining = frames_ - DualSenseReport::wave_frames;
-  std::copy_n(samples_.begin() + DualSenseReport::wave_frames * channels,
+  const std::size_t taken = std::min(frames_, DualSenseReport::wave_frames);
+  const std::size_t remaining = frames_ - taken;
+  std::copy_n(samples_.begin() + static_cast<std::ptrdiff_t>(taken * channels),
               remaining * channels, samples_.begin());
   frames_ = remaining;
 }

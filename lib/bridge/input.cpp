@@ -160,7 +160,7 @@ class InputThread {
   void perform(const nx_input_command& command);
   void perform_waveform_mode(std::uint32_t instance, bool enabled);
   void pump_waveform();
-  auto take_waveform(std::uint64_t now_ms) -> std::optional<Outgoing>;
+  auto take_waveform(std::uint64_t now_ns) -> std::optional<Outgoing>;
   static void heard(void* context, SDL_JoystickID id, const Uint8* opus,
                     int size);
   static auto ask_microphone(SDL_Gamepad* gamepad, bool live) -> bool;
@@ -1166,15 +1166,16 @@ void InputThread::pump_microphone() {
   }
 }
 
-auto InputThread::take_waveform(std::uint64_t now_ms)
+auto InputThread::take_waveform(std::uint64_t now_ns)
     -> std::optional<Outgoing> {
+  const std::uint64_t now_ms = now_ns / 1'000'000;
   Outgoing taken{.packet = {}, .taken_ms = now_ms};
   const std::lock_guard lock(wave_mutex_);
   if (wave_instance_ == 0) {
     return std::nullopt;
   }
   wave_stream_.expire(now_ms);
-  if (!wave_stream_.peek(taken.packet)) {
+  if (!wave_stream_.due(now_ns) || !wave_stream_.peek(taken.packet)) {
     return std::nullopt;
   }
   wave_stream_.consume();
@@ -1188,7 +1189,8 @@ void InputThread::pump_waveform() {
     return;
   }
   SDL_Gamepad* gamepad = SDL_GetGamepadFromID(instance);
-  const std::uint64_t now = SDL_GetTicks();
+  const std::uint64_t now_ns = SDL_GetTicksNS();
+  const std::uint64_t now = now_ns / 1'000'000;
   if (gamepad == nullptr) {
     outgoing_.reset();
     return;
@@ -1198,7 +1200,7 @@ void InputThread::pump_waveform() {
       outgoing_.reset();
     }
     if (!outgoing_) {
-      outgoing_ = take_waveform(now);
+      outgoing_ = take_waveform(now_ns);
     }
     if (!outgoing_ || !SDL_SendGamepadEffect(gamepad, outgoing_->packet.data(),
                                              outgoing_->packet.size())) {

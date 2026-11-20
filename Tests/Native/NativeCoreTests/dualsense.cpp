@@ -1,5 +1,6 @@
 #include "dualsense.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -14,7 +15,7 @@ using Pcm = std::span<const std::uint8_t>;
 using Wave = std::array<std::uint8_t, DualSenseReport::wave_bytes>;
 using Effect = std::array<std::uint8_t, DualSenseReport::effect_size>;
 
-static constexpr std::size_t held_frames = 96;
+static constexpr std::size_t held_frames = 192;
 
 static int test_wave_stream(void) {
   std::array<std::uint8_t, 256> pcm{};
@@ -29,15 +30,15 @@ static int test_wave_stream(void) {
       stream.frames() != 64 || !stream.peek(packet)) {
     return 20;
   }
-  if (packet[0] != 0x31 || packet[2] != 0x91 || packet[3] != 6 ||
-      packet[4] != 0x7e || packet[5] != DualSenseReport::wave_target_ms ||
-      packet[10] != 0x92 || packet[11] != 62 || packet[12] != 127 ||
-      packet[13] != 128 || packet[14] || packet[74]) {
+  if (packet[0] != 0x32 || packet[2] != 0x91 || packet[3] != 4 ||
+      packet[4] != 0x66 || packet[5] != DualSenseReport::wave_buffer ||
+      packet[6] != DualSenseReport::wave_buffer || packet[8] != 0xd2 ||
+      packet[9] != 64 || packet[10] != 127 || packet[11] != 128 || packet[12] ||
+      packet[138]) {
     return 21;
   }
   stream.consume();
-  stream.consume();
-  if (stream.frames() != 2 || stream.peek(packet)) {
+  if (stream.frames() != 0 || stream.peek(packet)) {
     return 22;
   }
   if (!stream.push(Pcm{pcm}, 1, 200) || stream.frames() != 64) {
@@ -76,15 +77,15 @@ static int test_wave_stream(void) {
     loud[index] = 0xff;
     loud[index + 1] = 0x7f;
   }
-  if (!stream.push(Pcm{loud}, 1, 400) || !stream.push(Pcm{quiet}, 1, 400) ||
-      !stream.push(Pcm{loud}.first(quiet.size()), 1, 400) ||
+  if (!stream.push(Pcm{loud}, 1, 400) || !stream.push(Pcm{loud}, 1, 400) ||
+      !stream.push(Pcm{quiet}, 1, 400) || !stream.push(Pcm{loud}, 1, 400) ||
       stream.frames() != held_frames) {
     return 73;
   }
   while (stream.peek(packet)) {
     for (std::size_t index = 0; index < DualSenseReport::wave_frames * 2;
          index++) {
-      if (packet[12 + index] != 127) {
+      if (packet[10 + index] != 127) {
         return 74;
       }
     }
@@ -211,9 +212,55 @@ static int test_controller_triggers(void) {
   return 0;
 }
 
+static int test_wave_pacing(void) {
+  std::array<std::uint8_t, 120> chunk{};
+  for (std::size_t index = 0; index < chunk.size(); index += 2) {
+    chunk[index] = 0x00;
+    chunk[index + 1] = 0x40;
+  }
+  Wave packet{};
+  WaveStream stream;
+  constexpr std::uint64_t millisecond = 1'000'000;
+  for (const std::uint64_t step : {std::uint64_t{1}, std::uint64_t{4}}) {
+    stream.reset();
+    std::size_t sent = 0;
+    std::size_t largest = 0;
+    for (std::uint64_t now = 0; now < 2000; now += step) {
+      if (now % 10 < step && !stream.push(Pcm{chunk}, 1, now)) {
+        return 110;
+      }
+      while (stream.due(now * millisecond)) {
+        if (!stream.peek(packet)) {
+          return 111;
+        }
+        stream.consume();
+        ++sent;
+      }
+      largest = std::max(largest, stream.frames());
+    }
+    const std::size_t played = sent * DualSenseReport::wave_frames;
+    if (played < 5500 || played > 6000 || largest > 192) {
+      std::fprintf(stderr, "step %llu: %zu frames in 2 s, largest %zu\n",
+                   static_cast<unsigned long long>(step), played, largest);
+      return 112;
+    }
+  }
+  stream.reset();
+  if (!stream.push(Pcm{chunk}, 1, 0) || stream.due(0) ||
+      !stream.push(Pcm{chunk}, 1, 0) || stream.due(0) ||
+      !stream.push(Pcm{chunk}, 1, 0) || stream.due(0) ||
+      !stream.push(Pcm{chunk}, 1, 0) || !stream.due(0) ||
+      stream.due(WaveStream::period_ns - 1) ||
+      !stream.due(WaveStream::period_ns)) {
+    return 113;
+  }
+  return 0;
+}
+
 int main(void) {
   int (*tests[])(void) = {
       test_wave_stream,
+      test_wave_pacing,
       test_effect_reports,
       test_controller_triggers,
   };
