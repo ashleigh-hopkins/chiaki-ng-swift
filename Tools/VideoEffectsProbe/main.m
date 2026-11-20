@@ -52,6 +52,17 @@ static CVPixelBufferRef makeFrame(OSType format) {
   return frame;
 }
 
+// Paints a diagonal stripe whose position follows `index`, so that frames differ from each other.
+static void paintStripe(CVPixelBufferRef frame, int index) {
+  CVPixelBufferLockBaseAddress(frame, 0);
+  uint8_t *luma = CVPixelBufferGetBaseAddressOfPlane(frame, 0);
+  size_t stride = CVPixelBufferGetBytesPerRowOfPlane(frame, 0);
+  for (size_t row = 0; row < 1080; row++) {
+    memset(luma + row * stride + (index * 8 + row / 4) % 512, 175, 128);
+  }
+  CVPixelBufferUnlockBaseAddress(frame, 0);
+}
+
 static BOOL testInterpolation(CVPixelBufferRef first, CVPixelBufferRef second,
                               NSUInteger expectedGenerated) {
   CNFrameInterpolationClient *client = [CNFrameInterpolationClient new];
@@ -90,28 +101,36 @@ static BOOL testInterpolation(CVPixelBufferRef first, CVPixelBufferRef second,
 // intervals once the first half second has passed. Nothing may be delivered after stop returns.
 // How many frames are interpolated depends on the GPU and its load, so it is only reported
 // (VIDEO_EFFECTS_VERBOSE=1).
-static BOOL testPacedStream(void) {
+//
+// With `repeats`, the stream carries 30 fps content: each picture is offered twice. Every
+// picture must come out once, in order; a copy may come out only before the client has
+// recognised the cadence, and the client must drop copies once it has. The interpolated frame in
+// the copy's slot is shown half a content interval before the picture after it, so the hold
+// limit is four stream intervals.
+static BOOL testPacedStream(BOOL repeats) {
   enum { kFrames = 16, kRate = 60, kOffered = kRate * 3, kWarmUp = kRate / 2 };
+  const int step = repeats ? 2 : 1;
+  const int pictures = kOffered / step;
+  const double holdLimit = (repeats ? 4.0 : 3.0) / kRate;
   CVPixelBufferRef *frames = calloc(kFrames, sizeof(CVPixelBufferRef));
   for (int index = 0; index < kFrames; index++) {
     frames[index] = makeFrame(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     if (!frames[index]) {
       return NO;
     }
-    CVPixelBufferLockBaseAddress(frames[index], 0);
-    uint8_t *luma = CVPixelBufferGetBaseAddressOfPlane(frames[index], 0);
-    size_t stride = CVPixelBufferGetBytesPerRowOfPlane(frames[index], 0);
-    for (size_t row = 0; row < 1080; row++) {
-      memset(luma + row * stride + (index * 8 + row / 4) % 512, 175, 128);
-    }
-    CVPixelBufferUnlockBaseAddress(frames[index], 0);
+    paintStripe(frames[index], index);
   }
   CNFrameInterpolationClient *client = [CNFrameInterpolationClient new];
   [client setSourceFrameRate:kRate];
   [client setEnabled:YES];
   double *offeredAt = calloc(kOffered, sizeof(double));
   __block NSUInteger decoded = 0;
+  __block NSUInteger copies = 0;
+  __block CVPixelBufferRef last = NULL;
   __block NSUInteger generated = 0;
+  __block double generatedAt = 0;
+  double *gaps = calloc(kOffered, sizeof(double));
+  __block NSUInteger gapCount = 0;
   __block NSUInteger generatedInARow = 0;
   __block BOOL ordered = YES;
   __block BOOL afterStop = NO;
@@ -127,12 +146,22 @@ static BOOL testPacedStream(void) {
       if (synthetic) {
         generated++;
         generatedInARow++;
+        generatedAt = now;
         ordered = ordered && generatedInARow == 1;
         return;
       }
+      if (generatedInARow == 1 && gapCount < kOffered) {
+        gaps[gapCount++] = now - generatedAt;
+      }
+      generatedInARow = 0;
+      if (frame == last) {
+        copies++;
+        return;
+      }
+      last = frame;
       ordered = ordered && frame == frames[decoded % kFrames];
-      if (decoded < kOffered) {
-        double hold = now - offeredAt[decoded];
+      if (decoded < (NSUInteger)pictures) {
+        double hold = now - offeredAt[decoded * step];
         if (decoded < kWarmUp) {
           warmUpHold = MAX(warmUpHold, hold);
         } else {
@@ -140,7 +169,6 @@ static BOOL testPacedStream(void) {
         }
       }
       decoded++;
-      generatedInARow = 0;
     });
   };
   double start = NSProcessInfo.processInfo.systemUptime;
@@ -150,18 +178,21 @@ static BOOL testPacedStream(void) {
       usleep((useconds_t)(wait * 1e6));
     }
     offeredAt[index] = NSProcessInfo.processInfo.systemUptime;
-    [client offer:frames[index % kFrames] handler:handler];
+    [client offer:frames[(index / step) % kFrames] handler:handler];
   }
   usleep(200000);
+  NSDictionary *statistics = client.statistics;
   __block NSUInteger decodedBeforeStop = 0;
+  __block NSUInteger copiesBeforeStop = 0;
   __block NSUInteger generatedBeforeStop = 0;
   dispatch_sync(sink, ^{
     decodedBeforeStop = decoded;
+    copiesBeforeStop = copies;
     generatedBeforeStop = generated;
   });
   // Stop while interpolations are running.
   for (int index = 0; index < 4; index++) {
-    [client offer:frames[(kOffered + index) % kFrames] handler:handler];
+    [client offer:frames[(pictures + index) % kFrames] handler:handler];
   }
   [client stop];
   atomic_store(&stopped, YES);
@@ -170,18 +201,42 @@ static BOOL testPacedStream(void) {
     CVPixelBufferRelease(frames[index]);
   }
   free(frames);
+  // The decoded frame should follow its interpolated frame by half a content interval: the
+  // median gap must be at least a third of that.
+  __block double medianGap = 0;
+  __block double shortestGap = 0;
   __block BOOL passed = NO;
   dispatch_sync(sink, ^{
     free(offeredAt);
-    passed = decodedBeforeStop == kOffered && ordered && !afterStop && generatedBeforeStop > 0 &&
-             longestHold < 3.0 / kRate;
+    qsort_b(gaps, gapCount, sizeof(double), ^int(const void *left, const void *right) {
+      double difference = *(const double *)left - *(const double *)right;
+      return difference < 0 ? -1 : difference > 0;
+    });
+    medianGap = gapCount ? gaps[gapCount / 2] : 0;
+    shortestGap = gapCount ? gaps[0] : 0;
+    free(gaps);
+    passed = decodedBeforeStop == (NSUInteger)pictures && ordered && !afterStop &&
+             generatedBeforeStop > 0 && longestHold < holdLimit &&
+             medianGap >= 1.0 / (3.0 * 2.0 * kRate / step);
   });
+  NSUInteger dropped = [statistics[@"repeatsDropped"] unsignedIntegerValue];
+  BOOL halfRate = [statistics[@"halfRate"] boolValue];
+  if (repeats) {
+    // Copies come out only while the cadence is being recognised.
+    passed =
+        passed && halfRate && dropped > 0 && copiesBeforeStop + dropped == (NSUInteger)pictures;
+  } else {
+    passed = passed && !halfRate && copiesBeforeStop == 0 && dropped == 0;
+  }
   if (!passed || getenv("VIDEO_EFFECTS_VERBOSE")) {
     fprintf(stderr,
-            "paced 1080p60: decoded %lu/%d generated %lu ordered=%d afterStop=%d "
-            "longest hold %.1f ms (warm-up %.1f ms)\n",
-            (unsigned long)decodedBeforeStop, kOffered, (unsigned long)generatedBeforeStop, ordered,
-            afterStop, longestHold * 1000, warmUpHold * 1000);
+            "paced 1080p60%s: pictures %lu/%d copies %lu dropped %lu halfRate=%d generated %lu "
+            "ordered=%d afterStop=%d longest hold %.1f ms (warm-up %.1f ms) "
+            "generated-to-decoded gap median %.1f ms shortest %.1f ms\n",
+            repeats ? " (30 fps content)" : "", (unsigned long)decodedBeforeStop, pictures,
+            (unsigned long)copiesBeforeStop, (unsigned long)dropped, halfRate,
+            (unsigned long)generatedBeforeStop, ordered, afterStop, longestHold * 1000,
+            warmUpHold * 1000, medianGap * 1000, shortestGap * 1000);
   }
   return passed;
 }
@@ -627,20 +682,25 @@ int main(int argc, const char *argv[]) {
     if (!first || !second || !tenBitFirst || !tenBitSecond) {
       return 3;
     }
+    paintStripe(second, 1);
     BOOL interpolation = testInterpolation(first, second, 1);
     BOOL tenBitFallback = testInterpolation(tenBitFirst, tenBitSecond, 0);
-    BOOL pacedStream = testPacedStream();
+    BOOL pacedStream = testPacedStream(NO);
+    BOOL cadence = testPacedStream(YES);
     BOOL diagnostics = testColourDiagnostics(@(argv[1]));
     CVPixelBufferRelease(first);
     CVPixelBufferRelease(second);
     CVPixelBufferRelease(tenBitFirst);
     CVPixelBufferRelease(tenBitSecond);
-    if (!interpolation || !tenBitFallback || !pacedStream || !diagnostics) {
-      fprintf(stderr, "FAIL: interpolation=%d tenBitFallback=%d pacedStream=%d diagnostics=%d\n",
-              interpolation, tenBitFallback, pacedStream, diagnostics);
+    if (!interpolation || !tenBitFallback || !pacedStream || !cadence || !diagnostics) {
+      fprintf(stderr,
+              "FAIL: interpolation=%d tenBitFallback=%d pacedStream=%d cadence=%d "
+              "diagnostics=%d\n",
+              interpolation, tenBitFallback, pacedStream, cadence, diagnostics);
       return 1;
     }
-    printf("PASS: frame generation, paced 1080p60 delivery, Main10 fallback, HDR diagnostics, "
+    printf("PASS: frame generation, paced 1080p60 delivery, 30 fps cadence, Main10 fallback, HDR "
+           "diagnostics, "
            "picture adjustments, "
            "debanding and highlight roll-off\n");
     return 0;
