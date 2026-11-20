@@ -391,9 +391,8 @@ using TextureCache = Owned<CVMetalTextureCacheRef>;
   CAMetalDisplayLink *link = [[CAMetalDisplayLink alloc] initWithMetalLayer:_metal];
   link.delegate = self;
   link.preferredFrameLatency = 1;
-  link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
-  _presentationFrameRate.store(60, std::memory_order_relaxed);
   _displayLink = [[CNDisplayLinkThread alloc] initWithLink:link];
+  self.presentationFrameRate = 60;
   return self;
 }
 
@@ -401,7 +400,14 @@ using TextureCache = Owned<CVMetalTextureCacheRef>;
   NSInteger bounded = frameRate >= 120 ? 120 : (frameRate >= 60 ? 60 : 30);
   _presentationFrameRate.store(bounded, std::memory_order_relaxed);
   [_displayLink performWithLink:^(CAMetalDisplayLink *link) {
+#if TARGET_OS_OSX
+    // The link runs at the display's fastest rate, up to 120 Hz, whatever the frame rate. A link
+    // at the frame rate itself skips about one tick in ten on a 120 Hz panel, and each skipped
+    // tick costs a frame; at twice the rate a late frame is shown one short tick later instead.
+    link.preferredFrameRateRange = CAFrameRateRangeMake(bounded, 120, 120);
+#else
     link.preferredFrameRateRange = CAFrameRateRangeMake(bounded, bounded, bounded);
+#endif
   }];
 }
 
